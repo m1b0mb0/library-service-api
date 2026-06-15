@@ -57,6 +57,12 @@ class BorrowingViewSet(
             else:
                 queryset = queryset.select_related("book")
 
+            is_active = self.request.query_params.get("is_active")
+
+            if is_active:
+                is_active = is_active.lower() == "true"
+                queryset = queryset.filter(actual_return_date__isnull=is_active)
+
         return queryset
 
     def perform_create(self, serializer):
