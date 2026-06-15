@@ -51,17 +51,29 @@ class BorrowingViewSet(
         else:
             queryset = self.queryset.filter(user=self.request.user)
 
-        if self.action in ("list", "retrieve"):
+        if self.action == "list":
             if user.is_staff:
                 queryset = queryset.select_related("book", "user")
+
+                user_id = self.request.query_params.get("user_id")
+                if user_id:
+                    queryset = queryset.filter(user__id=user_id)
             else:
                 queryset = queryset.select_related("book")
 
             is_active = self.request.query_params.get("is_active")
 
             if is_active:
-                is_active = is_active.lower() == "true"
-                queryset = queryset.filter(actual_return_date__isnull=is_active)
+                is_active = is_active.lower()
+                if is_active in ("true", "false"):
+                    is_active = is_active == "true"
+                    queryset = queryset.filter(actual_return_date__isnull=is_active)
+
+        if self.action == "retrieve":
+            if user.is_staff:
+                queryset = queryset.select_related("book", "user")
+            else:
+                queryset = queryset.select_related("book")
 
         return queryset
 
