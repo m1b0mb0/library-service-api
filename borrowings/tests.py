@@ -29,6 +29,10 @@ def detail_url(borrowing_id):
     return reverse("borrowings:borrowing-detail", args=[borrowing_id])
 
 
+def return_url(borrowing_id):
+    return f"{detail_url(borrowing_id)}return/"
+
+
 def sample_user(**params):
     defaults = {
         "email": f"user{get_user_model().objects.count() + 1}@example.com",
@@ -148,6 +152,13 @@ class PublicBorrowingApiTests(TestCase):
 
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertFalse(Borrowing.objects.exists())
+
+    def test_authentication_required_to_return_borrowing(self):
+        borrowing = sample_borrowing()
+
+        res = self.client.post(return_url(borrowing.id))
+
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
 class PrivateBorrowingApiTests(TestCase):
@@ -313,6 +324,48 @@ class PrivateBorrowingApiTests(TestCase):
         self.assertEqual(book.inventory, 3)
         self.assertFalse(Borrowing.objects.filter(book=book).exists())
 
+    def test_return_borrowing(self):
+        book = sample_book(inventory=2)
+        borrowing = sample_borrowing(book=book, user=self.user)
+
+        res = self.client.post(return_url(borrowing.id))
+        borrowing.refresh_from_db()
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(borrowing.actual_return_date, timezone.localdate())
+        self.assertEqual(book.inventory, 3)
+        self.assertEqual(res.data["actual_return_date"], str(timezone.localdate()))
+
+    def test_return_borrowing_twice_forbidden(self):
+        book = sample_book(inventory=2)
+        borrowing = sample_borrowing(
+            book=book,
+            user=self.user,
+            actual_return_date=timezone.localdate(),
+        )
+
+        res = self.client.post(return_url(borrowing.id))
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(book.inventory, 2)
+
+    def test_return_other_user_borrowing_not_found(self):
+        book = sample_book(inventory=2)
+        borrowing = sample_borrowing(
+            book=book,
+            user=sample_user(email="other@example.com"),
+        )
+
+        res = self.client.post(return_url(borrowing.id))
+        borrowing.refresh_from_db()
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIsNone(borrowing.actual_return_date)
+        self.assertEqual(book.inventory, 2)
+
 
 class AdminBorrowingApiTests(TestCase):
     def setUp(self):
@@ -419,6 +472,20 @@ class AdminBorrowingApiTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["id"], borrowing.id)
         self.assertEqual(res.data["user"], UserSerializer(user).data)
+
+    def test_admin_can_return_any_borrowing(self):
+        user = sample_user(email="reader@example.com")
+        book = sample_book(inventory=2)
+        borrowing = sample_borrowing(book=book, user=user)
+
+        res = self.client.post(return_url(borrowing.id))
+        borrowing.refresh_from_db()
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(borrowing.actual_return_date, timezone.localdate())
+        self.assertEqual(book.inventory, 3)
+        self.assertEqual(res.data["user"], user.email)
 
     def test_create_borrowing_with_past_expected_return_date_forbidden(self):
         book = sample_book(inventory=3)
