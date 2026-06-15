@@ -13,10 +13,13 @@ from books.models import Book
 from books.serializers import BookSerializer
 from borrowings.models import Borrowing
 from borrowings.serializers import (
+    BorrowingDetailAdminSerializer,
     BorrowingDetailSerializer,
+    BorrowingListAdminSerializer,
     BorrowingListSerializer,
     BorrowingSerializer,
 )
+from users.serializers import UserSerializer
 
 
 BORROWINGS_URL = reverse("borrowings:borrowing-list")
@@ -195,6 +198,46 @@ class PrivateBorrowingApiTests(TestCase):
         self.assertIn(own_borrowing.id, borrowing_ids)
         self.assertNotIn(other_borrowing.id, borrowing_ids)
 
+    def test_user_id_filter_does_not_expose_other_user_borrowings(self):
+        own_borrowing = sample_borrowing(user=self.user)
+        other_user = sample_user(email="other@example.com")
+        other_borrowing = sample_borrowing(user=other_user)
+
+        res = self.client.get(BORROWINGS_URL, {"user_id": other_user.id})
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(own_borrowing.id, borrowing_ids)
+        self.assertNotIn(other_borrowing.id, borrowing_ids)
+
+    def test_filter_borrowings_by_active_status(self):
+        active_borrowing = sample_borrowing(user=self.user)
+        returned_borrowing = sample_borrowing(
+            user=self.user,
+            actual_return_date=timezone.localdate(),
+        )
+
+        res = self.client.get(BORROWINGS_URL, {"is_active": "true"})
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(active_borrowing.id, borrowing_ids)
+        self.assertNotIn(returned_borrowing.id, borrowing_ids)
+
+    def test_filter_borrowings_by_returned_status(self):
+        active_borrowing = sample_borrowing(user=self.user)
+        returned_borrowing = sample_borrowing(
+            user=self.user,
+            actual_return_date=timezone.localdate(),
+        )
+
+        res = self.client.get(BORROWINGS_URL, {"is_active": "false"})
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertNotIn(active_borrowing.id, borrowing_ids)
+        self.assertIn(returned_borrowing.id, borrowing_ids)
+
     def test_retrieve_borrowing_detail(self):
         borrowing = sample_borrowing(user=self.user)
 
@@ -269,6 +312,113 @@ class PrivateBorrowingApiTests(TestCase):
         self.assertIn("expected_return_date", res.data)
         self.assertEqual(book.inventory, 3)
         self.assertFalse(Borrowing.objects.filter(book=book).exists())
+
+
+class AdminBorrowingApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = sample_user(email="admin@example.com", is_staff=True)
+        self.client.force_authenticate(self.admin)
+
+    def test_list_all_borrowings(self):
+        sample_borrowing(user=sample_user(email="first@example.com"))
+        sample_borrowing(user=sample_user(email="second@example.com"))
+
+        res = self.client.get(BORROWINGS_URL)
+
+        borrowings = Borrowing.objects.select_related("book", "user")
+        serializer = BorrowingListAdminSerializer(borrowings, many=True)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data, serializer.data)
+
+    def test_admin_list_borrowings_contains_user_info(self):
+        user = sample_user(email="reader@example.com")
+        borrowing = sample_borrowing(
+            book=sample_book(title="The Pragmatic Programmer"),
+            user=user,
+        )
+
+        res = self.client.get(BORROWINGS_URL)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data[0]["id"], borrowing.id)
+        self.assertEqual(res.data[0]["book"], "The Pragmatic Programmer")
+        self.assertEqual(res.data[0]["user"], user.email)
+
+    def test_filter_borrowings_by_user_id(self):
+        target_user = sample_user(email="target@example.com")
+        other_user = sample_user(email="other@example.com")
+        target_borrowing = sample_borrowing(user=target_user)
+        other_borrowing = sample_borrowing(user=other_user)
+
+        res = self.client.get(BORROWINGS_URL, {"user_id": target_user.id})
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(target_borrowing.id, borrowing_ids)
+        self.assertNotIn(other_borrowing.id, borrowing_ids)
+
+    def test_filter_all_borrowings_by_active_status(self):
+        active_borrowing = sample_borrowing(user=sample_user(email="active@example.com"))
+        returned_borrowing = sample_borrowing(
+            user=sample_user(email="returned@example.com"),
+            actual_return_date=timezone.localdate(),
+        )
+
+        res = self.client.get(BORROWINGS_URL, {"is_active": "true"})
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(active_borrowing.id, borrowing_ids)
+        self.assertNotIn(returned_borrowing.id, borrowing_ids)
+
+    def test_filter_user_borrowings_by_active_status(self):
+        target_user = sample_user(email="target@example.com")
+        active_borrowing = sample_borrowing(user=target_user)
+        returned_borrowing = sample_borrowing(
+            user=target_user,
+            actual_return_date=timezone.localdate(),
+        )
+        other_user_borrowing = sample_borrowing(
+            user=sample_user(email="other@example.com")
+        )
+
+        res = self.client.get(
+            BORROWINGS_URL,
+            {"user_id": target_user.id, "is_active": "true"},
+        )
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(active_borrowing.id, borrowing_ids)
+        self.assertNotIn(returned_borrowing.id, borrowing_ids)
+        self.assertNotIn(other_user_borrowing.id, borrowing_ids)
+
+    def test_retrieve_any_borrowing_detail(self):
+        user = sample_user(email="reader@example.com")
+        borrowing = sample_borrowing(user=user)
+
+        res = self.client.get(detail_url(borrowing.id))
+
+        serializer = BorrowingDetailAdminSerializer(borrowing)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data, serializer.data)
+
+    def test_admin_retrieve_borrowing_detail_contains_nested_user(self):
+        user = sample_user(
+            email="reader@example.com",
+            first_name="Test",
+            last_name="Reader",
+        )
+        borrowing = sample_borrowing(user=user)
+
+        res = self.client.get(detail_url(borrowing.id))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["id"], borrowing.id)
+        self.assertEqual(res.data["user"], UserSerializer(user).data)
 
     def test_create_borrowing_with_past_expected_return_date_forbidden(self):
         book = sample_book(inventory=3)
