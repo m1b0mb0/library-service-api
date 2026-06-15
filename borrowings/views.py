@@ -1,5 +1,12 @@
+from django.db import transaction
+from django.utils import timezone
+from django.shortcuts import get_object_or_404
+from django.db.models import F
 from rest_framework import mixins, viewsets
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework import status
 
 from borrowings.models import Borrowing
 from borrowings.serializers import (
@@ -9,6 +16,7 @@ from borrowings.serializers import (
     BorrowingCreateSerializer,
     BorrowingListAdminSerializer,
     BorrowingDetailAdminSerializer,
+    BorrowingReturnSerializer,
 )
 
 
@@ -41,6 +49,9 @@ class BorrowingViewSet(
         if self.action == "create":
             serializer = BorrowingCreateSerializer
 
+        if self.action == "return_borrowing":
+            serializer = BorrowingReturnSerializer
+
         return serializer
 
     def get_queryset(self):
@@ -69,7 +80,7 @@ class BorrowingViewSet(
                     is_active = is_active == "true"
                     queryset = queryset.filter(actual_return_date__isnull=is_active)
 
-        if self.action == "retrieve":
+        if self.action in ("retrieve", "return_borrowing"):
             if user.is_staff:
                 queryset = queryset.select_related("book", "user")
             else:
@@ -79,3 +90,27 @@ class BorrowingViewSet(
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=["post"], url_path="return")
+    def return_borrowing(self, request, pk=None):
+        """Return borrowed book"""
+
+        with transaction.atomic():
+            borrowing = get_object_or_404(
+                self.get_queryset().select_for_update(),
+                pk=pk,
+            )
+            if borrowing.actual_return_date:
+                return Response(
+                    {"detail": "This borrowing has already been returned."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            borrowing.actual_return_date = timezone.localdate()
+            borrowing.save(update_fields=["actual_return_date"])
+
+            borrowing.book.inventory = F("inventory") + 1
+            borrowing.book.save(update_fields=["inventory"])
+
+        serializer = self.get_serializer(borrowing)
+        return Response(serializer.data, status=status.HTTP_200_OK)
