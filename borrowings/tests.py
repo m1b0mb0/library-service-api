@@ -17,7 +17,6 @@ from borrowings.serializers import (
     BorrowingListSerializer,
     BorrowingSerializer,
 )
-from users.serializers import UserSerializer
 
 
 BORROWINGS_URL = reverse("borrowings:borrowing-list")
@@ -123,22 +122,59 @@ class PublicBorrowingApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
+    def test_authentication_required_to_list_borrowings(self):
+        res = self.client.get(BORROWINGS_URL)
+
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_authentication_required_to_retrieve_borrowing(self):
+        borrowing = sample_borrowing()
+
+        res = self.client.get(detail_url(borrowing.id))
+
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_authentication_required_to_create_borrowing(self):
+        book = sample_book()
+        payload = {
+            "book": book.id,
+            "expected_return_date": timezone.localdate() + timedelta(days=7),
+        }
+
+        res = self.client.post(BORROWINGS_URL, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertFalse(Borrowing.objects.exists())
+
+
+class PrivateBorrowingApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = sample_user(email="user@example.com")
+        self.client.force_authenticate(self.user)
+
     def test_list_borrowings(self):
-        sample_borrowing(book=sample_book(title="Atomic Habits"))
-        sample_borrowing(book=sample_book(title="Clean Code"))
+        sample_borrowing(
+            book=sample_book(title="Atomic Habits"),
+            user=self.user,
+        )
+        sample_borrowing(
+            book=sample_book(title="Clean Code"),
+            user=self.user,
+        )
 
         res = self.client.get(BORROWINGS_URL)
 
-        borrowings = Borrowing.objects.select_related("book", "user")
+        borrowings = Borrowing.objects.filter(user=self.user).select_related("book")
         serializer = BorrowingListSerializer(borrowings, many=True)
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data, serializer.data)
 
-    def test_list_borrowings_contains_short_book_and_user_info(self):
+    def test_list_borrowings_contains_short_book_info_without_user(self):
         borrowing = sample_borrowing(
             book=sample_book(title="The Pragmatic Programmer"),
-            user=sample_user(email="reader@example.com"),
+            user=self.user,
         )
 
         res = self.client.get(BORROWINGS_URL)
@@ -146,10 +182,21 @@ class PublicBorrowingApiTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data[0]["id"], borrowing.id)
         self.assertEqual(res.data[0]["book"], "The Pragmatic Programmer")
-        self.assertEqual(res.data[0]["user"], "reader@example.com")
+        self.assertNotIn("user", res.data[0])
+
+    def test_list_borrowings_returns_only_current_user_borrowings(self):
+        own_borrowing = sample_borrowing(user=self.user)
+        other_borrowing = sample_borrowing(user=sample_user(email="other@example.com"))
+
+        res = self.client.get(BORROWINGS_URL)
+
+        borrowing_ids = [borrowing["id"] for borrowing in res.data]
+
+        self.assertIn(own_borrowing.id, borrowing_ids)
+        self.assertNotIn(other_borrowing.id, borrowing_ids)
 
     def test_retrieve_borrowing_detail(self):
-        borrowing = sample_borrowing()
+        borrowing = sample_borrowing(user=self.user)
 
         res = self.client.get(detail_url(borrowing.id))
 
@@ -160,16 +207,80 @@ class PublicBorrowingApiTests(TestCase):
 
     def test_retrieve_borrowing_detail_contains_nested_book_and_user(self):
         book = sample_book(title="Clean Architecture", author="Robert Martin")
-        user = sample_user(
-            email="reader@example.com",
-            first_name="Test",
-            last_name="Reader",
-        )
-        borrowing = sample_borrowing(book=book, user=user)
+        borrowing = sample_borrowing(book=book, user=self.user)
 
         res = self.client.get(detail_url(borrowing.id))
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["id"], borrowing.id)
         self.assertEqual(res.data["book"], BookSerializer(book).data)
-        self.assertEqual(res.data["user"], UserSerializer(user).data)
+        self.assertNotIn("user", res.data)
+
+    def test_retrieve_other_user_borrowing_not_found(self):
+        borrowing = sample_borrowing(user=sample_user(email="other@example.com"))
+
+        res = self.client.get(detail_url(borrowing.id))
+
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_create_borrowing(self):
+        book = sample_book(inventory=3)
+        payload = {
+            "book": book.id,
+            "expected_return_date": timezone.localdate() + timedelta(days=7),
+        }
+
+        res = self.client.post(BORROWINGS_URL, payload)
+        book.refresh_from_db()
+        borrowing = Borrowing.objects.get(id=res.data["id"])
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(borrowing.book, book)
+        self.assertEqual(borrowing.user, self.user)
+        self.assertEqual(book.inventory, 2)
+        self.assertNotIn("user", res.data)
+
+    def test_create_borrowing_with_no_book_inventory_forbidden(self):
+        book = sample_book(inventory=0)
+        payload = {
+            "book": book.id,
+            "expected_return_date": timezone.localdate() + timedelta(days=7),
+        }
+
+        res = self.client.post(BORROWINGS_URL, payload)
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("book", res.data)
+        self.assertEqual(book.inventory, 0)
+        self.assertFalse(Borrowing.objects.filter(book=book).exists())
+
+    def test_create_borrowing_with_expected_return_date_today_forbidden(self):
+        book = sample_book(inventory=3)
+        payload = {
+            "book": book.id,
+            "expected_return_date": timezone.localdate(),
+        }
+
+        res = self.client.post(BORROWINGS_URL, payload)
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("expected_return_date", res.data)
+        self.assertEqual(book.inventory, 3)
+        self.assertFalse(Borrowing.objects.filter(book=book).exists())
+
+    def test_create_borrowing_with_past_expected_return_date_forbidden(self):
+        book = sample_book(inventory=3)
+        payload = {
+            "book": book.id,
+            "expected_return_date": timezone.localdate() - timedelta(days=1),
+        }
+
+        res = self.client.post(BORROWINGS_URL, payload)
+        book.refresh_from_db()
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("expected_return_date", res.data)
+        self.assertEqual(book.inventory, 3)
+        self.assertFalse(Borrowing.objects.filter(book=book).exists())
