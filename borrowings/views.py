@@ -18,6 +18,7 @@ from borrowings.serializers import (
     BorrowingDetailAdminSerializer,
     BorrowingReturnSerializer,
 )
+from borrowings.notifications import send_telegram_message
 
 
 class BorrowingViewSet(
@@ -88,8 +89,23 @@ class BorrowingViewSet(
 
         return queryset
 
+    @staticmethod
+    def build_borrowing_create_message(borrowing: Borrowing) -> str:
+        return (
+            "New borrowing created\n"
+            f"Borrowing ID: {borrowing.id}\n"
+            f"User: {borrowing.user.email}\n"
+            f"Book: {borrowing.book.title}\n"
+            f"Borrow date: {borrowing.borrow_date}\n"
+            f"Expected return date: {borrowing.expected_return_date}"
+        )
+
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        with transaction.atomic():
+            borrowing = serializer.save(user=self.request.user)
+            message = self.build_borrowing_create_message(borrowing)
+
+            transaction.on_commit(lambda: send_telegram_message(message))
 
     @action(detail=True, methods=["post"], url_path="return")
     def return_borrowing(self, request, pk=None):
