@@ -22,11 +22,66 @@ created borrowings.
 - Django
 - Django REST Framework
 - Simple JWT
-- SQLite
+- PostgreSQL
+- Docker
+- Docker Compose
 - python-dotenv
 - python-telegram-bot
 
 ## Setup
+
+Create `.env` from the sample:
+
+```powershell
+copy .env.sample .env
+```
+
+Configure PostgreSQL and Telegram credentials in `.env`:
+
+```env
+POSTGRES_DB=library_service
+POSTGRES_PORT=5432
+POSTGRES_USER=library_user
+POSTGRES_PASSWORD=library_password
+POSTGRES_HOST=db
+PGDATA=/var/lib/postgresql/data
+TELEGRAM_BOT_TOKEN=your_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+```
+
+Use `POSTGRES_HOST=db` when running with Docker Compose. For local setup, use
+your local database host, for example `POSTGRES_HOST=localhost`.
+
+### Docker Setup
+
+Build and start the containers:
+
+```powershell
+docker compose up --build
+```
+
+The API will be available at:
+
+```http
+http://127.0.0.1:8000/
+```
+
+The web container waits for PostgreSQL, applies migrations, and then starts the
+Django development server.
+
+Stop containers:
+
+```powershell
+docker compose down
+```
+
+Stop containers and remove the database volume:
+
+```powershell
+docker compose down -v
+```
+
+### Local Setup
 
 Create and activate a virtual environment:
 
@@ -41,18 +96,8 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Create `.env` from the sample:
-
-```powershell
-copy .env.sample .env
-```
-
-Set Telegram credentials in `.env`:
-
-```env
-TELEGRAM_BOT_TOKEN=your_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-```
+For local setup, make sure PostgreSQL is installed and running before applying
+migrations.
 
 Apply migrations:
 
@@ -184,6 +229,14 @@ The message includes:
 
 ## Running Tests
 
+With local Python:
+
 ```powershell
 python manage.py test
+```
+
+Inside Docker:
+
+```powershell
+docker compose run --rm library-service python manage.py test
 ```
